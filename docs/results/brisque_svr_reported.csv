@@ -1,0 +1,4 @@
+setting,srcc,plcc,evidence
+default_sampling_default_svr,0.5141,0.5529,team_presentation_live_vqc_117_videos
+uniform_32_frames_default_svr,0.5108,0.5476,team_presentation_live_vqc_117_videos
+uniform_32_frames_gridsearch_svr,0.5110,0.4848,team_presentation_live_vqc_117_videos

@@ -1,0 +1,102 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments and package/build output
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# IDE / OS
+.idea/
+.vscode/
+.agents/
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+
+# Raw datasets and media (source code under datasets/ is intentionally kept)
+/data/
+/KVQdata/
+/datasets_raw/
+/dataset_csv/
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.yuv
+*.mat
+/KoNViD_1k_mos.csv
+/KVQ_extracted.txt
+/test_MOS_with_labels.txt
+/test_konvid_1k.txt
+/test_live_vqc.txt
+/test_youtube_ugc.txt
+
+# Training caches, checkpoints, tracking and runtime output
+/checkpoint/
+/checkpoint_dp/
+/checkpoint_ddp/
+/checkpoint_7class/
+/checkpoint_paper7class/
+/log/
+/logs/
+/runs/
+/wandb/
+/tmp/
+/_docx_render_check/
+*.log
+output.txt
+predictions*.txt
+
+# Local analysis/report-generation artifacts. Curated public results live in docs/results/ and figs/.
+/analysis/
+*.doc
+*.docx
+*.pdf
+*.ppt
+*.pptx
+/专业综合设计_KSVQE复现报告大纲.md
+/*.png
+
+# Local report-writing and screenshot-generation utilities are kept on disk but
+# are not part of the public model repository.
+/scripts/*docx*.py
+/scripts/write_*.py
+/scripts/rewrite_*.py
+/scripts/update_*.py
+/scripts/cleanup_*.py
+/scripts/soften_*.py
+/scripts/create_code_screenshots.py
+/scripts/create_method_figures.py
+/figs/code_screenshots/
+/figs/test
+/requirements_4090_py38.txt
+/test11.py
+
+# The handoff folder contains duplicated source/config/pretrained files. Keep the
+# final fine-tuned checkpoint and the handoff note, but track only one copy of dependencies.
+/handoff_fullstack_inference/source_code/
+/handoff_fullstack_inference/config/
+/handoff_fullstack_inference/pretrained_weights/
+/handoff_fullstack_inference/requirements_4090_py38.txt
+
+# Local secrets if added later
+.env
+.env.*
+!.env.example
+credentials*.json
+secrets*.yml
+secrets*.yaml

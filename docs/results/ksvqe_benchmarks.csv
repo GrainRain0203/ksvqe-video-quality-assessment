@@ -1,0 +1,9 @@
+training_protocol,dataset,srcc,plcc,krcc,rmse,evidence
+challenge_split_7class,KVQ,0.8657,0.8679,0.6793,0.3063,raw_log
+challenge_split_7class,LIVE-VQC,0.5010,0.5372,0.3509,16.4111,raw_log
+challenge_split_7class,KoNViD-1k,0.4667,0.4789,,,consolidated_report_incomplete_raw_log
+challenge_split_7class,YouTube-UGC,0.6383,0.6357,0.4525,0.5524,raw_log
+reference_80_20_paperlike_7class,KVQ,0.8372,0.8456,0.6471,0.3170,raw_log
+reference_80_20_paperlike_7class,LIVE-VQC,0.5859,0.5988,0.4117,15.2799,raw_log
+reference_80_20_paperlike_7class,KoNViD-1k,0.5432,0.5601,0.3822,0.6011,raw_log
+reference_80_20_paperlike_7class,YouTube-UGC,0.7038,0.7110,0.5099,0.4920,raw_log
