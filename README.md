@@ -1,112 +1,190 @@
-# KSVQE Video Quality Assessment
+# KSVQE 视频质量评价课程设计
 
-> Reproduction, evaluation and deployment-oriented engineering for no-reference short-form video quality assessment, with archived KSVQE–BRISQUE comparison evidence from a team demo.
+[English Version](README_EN.md)
 
-## Overview
+这个项目是我在课程设计中整理的无参考视频质量评价实验。我主要想跑通 KSVQE 的训练和评价流程，比较不同训练设置在 KVQ 本库与其他视频库上的表现，也想看看它和 BRISQUE 对人工失真的反应是否一致。
 
-This repository turns the official [KVQ / KSVQE challenge code](https://github.com/lixinustc/KVQ-Challenge-CVPR-NTIRE2024) into a traceable video-quality pipeline: dataset manifest construction, temporal sampling, spatial fragment extraction, KSVQE fine-tuning, validation, cross-dataset evaluation and inference output.
+我基于 [KVQ / KSVQE 官方代码](https://github.com/lixinustc/KVQ-Challenge-CVPR-NTIRE2024) 做数据与配置适配、权重加载调试、训练测试和结果整理。KSVQE 网络来自原论文与开源实现。团队演示还使用过 BRISQUE、人工失真控制和网页展示；当前仓库保留了相关结果记录，但没有这些部分的实现源码，因此不能直接从这里启动完整 Web 系统。
 
-本项目的个人工作重点是 **KSVQE 论文与代码复现、数据与配置适配、训练/测试流程跑通、权重加载调试、跨库实验和结果分析**。团队原型还集成过 BRISQUE、人工失真控制和网页展示；这些部分只有演示材料与结果留存在当前工作区，源码并未随本仓库保存，因此下文会明确标记为 team-demo evidence，不把它描述为可由本仓库直接复现的个人实现。
+## 方法与调用流程
 
-![KSVQE framework](figs/ksvqe_framework_from_paper.png)
+主要调用链是：
 
-## Features
+```text
+train.py / test.py
+  → trainer.py::Trainer
+  → datasets.ViewDecompositionDataset_KVQ
+  → models.model.VQA_Network
+  → models.backbones.KSVQE_model.KSVQE
+  → models.head.VQAHead
+```
 
-- End-to-end KSVQE train / validation / inference entry points based on PyTorch.
-- Decord-first video decoding with an OpenCV fallback.
-- Multi-view preprocessing: CLIP resize view, normalized spatial fragments and original fragments.
-- Reference-content 80/20 split builder with fixed seed for the paper-like 7-class experiment.
-- SRCC, PLCC, KRCC and RMSE evaluation plus cross-dataset tests on LIVE-VQC, KoNViD-1k and YouTube-UGC.
-- Explicit model-checkpoint key normalization and EMA evaluation.
-- Heuristic KVQ processing-workflow analysis using metadata and sampled-frame statistics.
-- Curated result provenance: raw-log-backed values are separated from presentation-only values.
+![原论文中的 KSVQE 框架图](figs/ksvqe_framework_from_paper.png)
 
-## Pipeline
+上图来自原论文，用于理解方法；当前实现以 [KSVQE_model.py](models/backbones/KSVQE_model.py) 为准。
+
+KSVQE 结合 CLIP ViT-B/16 语义特征、质量相关区域选择（QRS）、冻结的 CONTRIQUE 失真编码器和 3D Swin 时空特征，再通过语义与失真适配、注意力交互和调制融合特征，交给 VQAHead 回归质量分数。我在这里使用和调试这条流程，没有把这些研究模块作为个人原创方法。
 
 ```mermaid
 flowchart LR
-    A["Video + 4-column manifest"] --> B["Decord / OpenCV decoding"]
-    B --> C["Unified temporal sampling"]
-    C --> D1["CLIP resize view"]
-    C --> D2["9x9 spatial fragments"]
-    C --> D3["Original fragments"]
-    D1 --> E1["CLIP semantic features + QRS"]
-    D2 --> E2["3D Swin technical features"]
-    D3 --> E3["Frozen CONTRIQUE distortion features"]
-    E1 --> F["Semantic / distortion feature interaction"]
-    E2 --> F
-    E3 --> F
-    F --> G["VQA regression head"]
-    G --> H1["Validation: SRCC / PLCC / KRCC / RMSE"]
-    G --> H2["Inference: output.txt"]
+    A["Video + four-column manifest"] --> B["Temporal sampling and decoding"]
+    B --> C["CLIP-normalized resize_video"]
+    B --> D["Normalized fragment grid"]
+    C --> E["CLIP key-frame features"]
+    E --> Q["Quality-aware region selection"]
+    D --> Q
+    Q --> S["3D Swin"]
+    Q --> F["Frozen CONTRIQUE + trainable adapter"]
+    E --> M["Semantic / distortion interaction"]
+    S --> M
+    F --> M
+    M --> H["VQAHead"]
+    H --> V["Labeled evaluation"]
+    H --> O["Display score in output.txt"]
 ```
 
-The implementation path is `train.py` or `test.py` → `Trainer` → `ViewDecompositionDataset_KVQ` → `VQA_Network` → `KSVQE` → `VQAHead`.
+这里有一个容易被示意图简化的代码细节：dataset 会返回 `ori_fragment`，但当前 KSVQE 前向过程实际把 QRS 选出的 `x_sel_ori.detach()[:, :, ::2, ...]` 送入 CONTRIQUE，并不是直接读取 `ori_fragment`。
 
-## Method
+## 视频与标注处理
 
-### Video preprocessing
-
-Each annotation row is:
+标注文件每行四列，不带表头：
 
 ```text
-relative/video.mp4,content_or_class_label,distortion_label,mos
+relative/video.mp4,cls_label,dis_label,mos
 ```
 
-The main dataset class performs the following work:
+路径相对于 YAML 的 `data_prefix`；`mos` 是训练和验证用的主观质量分数，`dis_label` 进入失真对比损失。dataset 会解析 `cls_label`，但当前 KSVQE 前向读取的是 `dis_label`。
 
-1. `UnifiedFrameSampler` selects clips from the full frame range. Main experiments use 32 frames per clip; the paper-like setting uses interval 2, while the original challenge-style setting uses interval 4. Training uses one clip and validation uses three clips.
-2. `decord.VideoReader` decodes the union of requested frame indices once. If that path fails, the code falls back to OpenCV decoding.
-3. A resized view is normalized with CLIP statistics for semantic feature extraction.
-4. A technical view is built from a 9 × 9 grid of 32 × 32 fragments, yielding a 288 × 288 fragment tensor, and normalized with ImageNet-style pixel statistics.
-5. The original sampled fragment tensor, frame indices, original shape and distortion label are retained for KSVQE's quality-aware branches.
+[datasets/fusion_datasets.py](datasets/fusion_datasets.py) 中的流程包括：
 
-### KSVQE invocation
+1. 用 `UnifiedFrameSampler` 选取帧索引。主配置 `clip_len=32`，训练 `num_clips=1`，验证 `num_clips=3`；challenge 设置的间隔为 4，paper-like 设置为 2。
+2. 优先通过 Decord 解码请求帧的并集，避免重复解码。异常时进入 OpenCV 回退分支；回退分支没有显式 BGR→RGB 转换，不能假定两条路径数值完全一致。
+3. 生成 resize view，并按 CLIP 的均值、标准差归一化。
+4. 抽取 9 × 9 个 32 × 32 的空间 fragments，拼成 288 × 288，再按 ImageNet 风格的像素统计量归一化。
+5. 返回 `resize_video`、`fragment`、`ori_fragment`、帧索引、原始尺寸和标签。
 
-`models/model.py` creates `VQA_Network`, which instantiates `models/backbones/KSVQE_model.py::KSVQE` and a regression head. The backbone combines:
+进入网络的 fragment 张量为 $B\times3\times T\times288\times288$，$B$ 为 batch size，$T$ 为采样后的总帧数。当前无 `t_frag` 的主配置在训练时取 32 帧，验证配置取 96 帧。`num_clips=3` 是采样配置；KSVQE 直接读取 `fragment` / `resize_video`，通用 Trainer 按模型键拆分 clip 的逻辑没有直接作用到这两个键，因此这里不把它描述为已经核实的“三次独立推理再平均”。
 
-- a CLIP ViT-B/16 semantic branch;
-- quality-aware region selection from key frames;
-- a frozen CONTRIQUE encoder for distortion representations;
-- a 3D Swin Transformer technical branch;
-- semantic and distortion interaction/adaptation modules followed by feature fusion;
-- a `VQAHead` that outputs the video quality score.
+### 两种训练划分与七类标签
 
-Training uses AdamW, warm-up plus cosine decay and EMA (`0.999`). The reproduced default objective is PLCC loss + `0.3 ×` distortion contrastive loss; rank loss is configurable and set to zero in the main paper-like run.
+| 设置 | challenge / 7class | reference 80/20 / paper7class |
+| --- | --- | --- |
+| 划分方式 | 原 challenge 目录划分 | 合并原 Train / Validation / Test 标注后，按连续七行组成的组重新划分 |
+| train batch size | 4 | 8 |
+| frame interval | 4 | 2 |
+| 主配置 | [Kwai_KSVQE.yml](config/Kwai_KSVQE.yml) | [Kwai_KSVQE_paper7class.yml](config/Kwai_KSVQE_paper7class.yml) |
 
-### Checkpoint handling
+[make_kvq_paper_split.py](scripts/make_kvq_paper_split.py) 假定每连续七行属于同一 reference content，用 seed 42 打乱这些组，按 80/20 划分，并按组内位置把两列标签都写成 0–6。源标注的顺序必须满足这个假定；它不读取真实 reference ID 或编码 QP 元数据。
 
-The loader accepts plain state dictionaries or a top-level `state_dict`, removes a `module.` prefix and remaps earlier `technical_backbone` / `technical_head` names to the current KSVQE names. Pretrained paths now resolve relative to the repository and can be overridden with:
+旧实验汇总把七类称为“原始视频 + 6 个 QP bin”，但当前脚本只能确认**按行位置生成的近似标签**，不能证明每个编号对应真实 QP 档位。`paper7class` 表示当时尝试的 paper-like 设置，不等于精确复现论文协议，也不是保留原官方测试集不变的划分。
 
-- `KSVQE_SWIN_WEIGHTS`
-- `KSVQE_CONTRIQUE_WEIGHTS`
-- `KSVQE_CLIP_WEIGHTS`
+另一个 [labeltotxt.py](labeltotxt.py) 则每七行赋同一个递增组 ID，行为与组内 0–6 编号不同，不能把它直接当作等价的七类标签生成器。
 
-## Installation
+## 训练与评价
 
-The reproduced environment was Python 3.8 on an RTX 4090 / CUDA 11.8 setup.
+两份主配置均使用 50 epochs、2.5 epochs warmup、AdamW、学习率 `3e-5`、weight decay 0.05，启用 EMA，参数更新系数为 0.999。回归头配置为输入通道 768、隐藏通道 64。
 
-```bash
-conda create -n ksvqe python=3.8 -y
-conda activate ksvqe
+当前主训练目标是：
 
-# Install the CUDA build appropriate for your machine. Example for CUDA 11.8:
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install -r requirements.txt
+$$
+L=L_{\mathrm{PLCC}}+0.3L_{\mathrm{distortion\_contrastive}}.
+$$
+
+`trainer.py` 还计算可配置的 rank loss，两份主配置中的权重都是 0。PLCC loss 使用 batch 标准化后的预测、MOS 及相关项计算；具体实现见 [trainer.py](trainer.py)，不要把它简单理解为原始分数上的 MSE。
+
+权重加载支持普通参数字典或顶层 `state_dict`，会移除 `module.` 前缀，将旧 `technical_backbone` / `technical_head` 前缀映射为当前 KSVQE 名称，并打印 missing / unexpected keys。辅助预训练权重支持 `KSVQE_SWIN_WEIGHTS`、`KSVQE_CONTRIQUE_WEIGHTS` 和 `KSVQE_CLIP_WEIGHTS` 环境变量覆盖路径。
+
+### 有标签评价与展示分数
+
+`test.py --mode val` 使用有效 MOS，汇总每个视频的预测后，将预测均值和标准差线性对齐到这批 MOS：
+
+$$
+\widetilde{p}_i=\frac{p_i-\mu_p}{\sigma_p}\sigma_y+\mu_y.
+$$
+
+随后计算 SRCC（也称 SROCC）、PLCC、KRCC 和 RMSE。这里的对齐使用评价集标签，不是独立训练出来的校准模型；不同数据集 MOS 标度不同，不宜直接横向比较 RMSE。
+
+`test.py --mode test` 不做上述标签对齐，而是裁剪并映射展示分数：
+
+$$
+q=1+4\frac{\operatorname{clip}(p,-2.5,2.5)+2.5}{5}.
+$$
+
+输出写入根目录 `output.txt`，范围为 $[1,5]$。这是代码中的展示用启发式映射；它不等于下面团队演示表的分数标度，也不能替代带标签的评价。
+
+## 保存的实验结果
+
+以下数值来自 [ksvqe_benchmarks.csv](docs/results/ksvqe_benchmarks.csv)。[结果来源说明](docs/results/README.md) 将多数行标为整理时曾核对原始日志，但原始日志没有随当前仓库提交；这里保留来源标记，不把本次文档核对写成重新跑出的实验。
+
+| 训练设置 | 数据集 | SRCC | PLCC | KRCC | RMSE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| challenge / 7class | KVQ | 0.8657 | 0.8679 | 0.6793 | 0.3063 |
+| challenge / 7class | LIVE-VQC | 0.5010 | 0.5372 | 0.3509 | 16.4111 |
+| challenge / 7class | KoNViD-1k | 0.4667 | 0.4789 | — | — |
+| challenge / 7class | YouTube-UGC | 0.6383 | 0.6357 | 0.4525 | 0.5524 |
+| reference 80/20 / paper7class | KVQ | 0.8372 | 0.8456 | 0.6471 | 0.3170 |
+| reference 80/20 / paper7class | LIVE-VQC | 0.5859 | 0.5988 | 0.4117 | 15.2799 |
+| reference 80/20 / paper7class | KoNViD-1k | 0.5432 | 0.5601 | 0.3822 | 0.6011 |
+| reference 80/20 / paper7class | YouTube-UGC | 0.7038 | 0.7110 | 0.5099 | 0.4920 |
+
+challenge / KoNViD-1k 行被明确标为汇总报告来源，旧来源说明记载原日志只到 16/1200。尽管旧指标汇总另列了 KRCC、RMSE，这里按来源更明确的 CSV 留空，不补成已确认结果。
+
+从这些记录来看，我调整后的 paper7class 在 KVQ 上的 SRCC 从 0.8657 降到 0.8372，在 LIVE-VQC、KoNViD-1k、YouTube-UGC 上分别从 0.5010 / 0.4667 / 0.6383 变为 0.5859 / 0.5432 / 0.7038。划分、batch size 和时间间隔一起改变了，所以我把它理解为两套设置的观察结果，没有据此认定某一项修改单独改善了跨库表现。
+
+![归档的验证指标趋势图](figs/result_figures/fig4_1_validation_metric_trend.png)
+
+图中是归档的验证趋势，不是这次重新训练的结果。还要注意，Trainer 保存的历史 best tuple 对各指标分别取最大或最小值，不保证来自同一个 epoch；核对 checkpoint 时应看具体评测输出，而不只看 `model-n` / `model-s` 或汇总 best 值。
+
+## BRISQUE、人工失真与网页演示记录
+
+在课程团队演示中，KSVQE 用于深度视频质量评分，BRISQUE 作为传统无参考图像质量方法对比。已有说明记录了逐帧 BRISQUE 处理及 RBF-SVR 拟合视频 MOS，也记录了视频上传、压缩、blur、sharpen、noise、fog、brightness / saturation 控制和并列评分展示。
+
+**这些功能的 Web 前后端、失真生成代码、BRISQUE 实现和原始日志没有提交。** 当前可以检查的是 [推理交接说明](handoff_fullstack_inference/HANDOFF_README.md)、KSVQE 推理入口和结果 CSV；不能从仓库确认 Web 路由、失真参数单位、分数转换公式或具体个人分工。
+
+### 单视频失真示例
+
+[team_distortion_demo.csv](docs/results/team_distortion_demo.csv) 保存了同一演示视频的以下结果。level 是演示中的参数值，单位未保存；两列都是演示页面使用的“越大越好”分数。来源说明记载 BRISQUE 原始“越小越好”的失真分数在展示前做过反向处理。
+
+| 条件 | level | KSVQE 展示分数 | 相对 clean | BRISQUE 展示分数 | 相对 clean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| clean | 0 | 45.7 | 0.0 | 47.6 | 0.0 |
+| compression | 10 | 36.9 | -8.8 | 44.1 | -3.5 |
+| blur | 12 | 47.9 | +2.2 | 41.2 | -6.4 |
+| sharpen | 10 | 45.1 | -0.6 | 45.0 | -2.6 |
+| fog | 50 | 46.1 | +0.4 | 43.5 | -4.1 |
+| fog | 100 | 52.7 | +7.0 | 30.5 | -17.1 |
+| noise | 30 | 41.1 | -4.6 | 42.3 | -5.3 |
+
+这里有一个和直觉不完全一致的现象：blur 和 fog 条件下，KSVQE 展示分数反而上升，BRISQUE 展示分数下降；fog 从 50 到 100 时，这个差别更明显。compression 和 noise 则让两个展示分数都下降。
+
+我目前把它保留为一个需要继续检查的现象。区域选择对内容变化的响应、训练失真分布和展示标度都有可能影响结果，但缺少失真实现与多视频对照，不能确定原因，更不能总结成“加雾改善质量”或“某个模型普遍更好”。已有记录没有 brightness 的准确数值，也没有完整的强度扫描曲线，这里没有补齐。
+
+### BRISQUE + SVR 记录
+
+[brisque_svr_reported.csv](docs/results/brisque_svr_reported.csv) 记录的是团队材料中的 LIVE-VQC 117 视频验证划分：
+
+| 设置 | SRCC | PLCC |
+| --- | ---: | ---: |
+| 默认采样 + 默认 SVR | 0.5141 | 0.5529 |
+| 均匀 32 帧 + 默认 SVR | 0.5108 | 0.5476 |
+| 均匀 32 帧 + GridSearchCV | 0.5110 | 0.4848 |
+
+这组记录里，增加均匀采样或网格搜索并没有带来一致改善，最后一组 PLCC 反而更低。我没有把它与不同划分的 KSVQE 跨库结果当作严格同协议排名。
+
+## 如何运行 KSVQE
+
+从仓库根目录执行。优先复用已有环境；[requirements.txt](requirements.txt) 记载的历史环境是 Python 3.8 / CUDA 11.8 / RTX 4090，这不表示只支持这一张显卡。当前 Trainer 显式使用 CUDA，没有可直接切换的 CPU 推理路径。
+
+```powershell
+python -m pip install -r requirements.txt
+python -c "import torch, cv2, decord, timm, einops; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-KSVQE is GPU-oriented. The current trainer always constructs a CUDA device, so CPU-only inference is not presented as supported.
+PyTorch 需要与本机 CUDA 环境匹配。依赖文件使用范围约束，并非当时环境的完整锁定版本。
 
-## Dataset Setup
+### 数据和权重
 
-Raw datasets are intentionally excluded from Git. Obtain them from their official project pages and respect their licenses:
-
-- [KVQ project and dataset information](https://lixinustc.github.io/projects/KVQ/)
-- [LIVE-VQC](https://live.ece.utexas.edu/research/LIVEVQC/)
-- [KoNViD-1k](https://database.mmsp-kn.de/konvid-1k-database.html)
-- [YouTube-UGC](https://media.withyoutube.com/)
-
-Recommended local layout:
+本地目录示例：
 
 ```text
 data/
@@ -119,154 +197,97 @@ data/
 └── YouTube-UGC/original_videos_h264/
 ```
 
-The `data/` directory, dataset-derived manifests in `dataset_csv/` and video extensions are ignored by Git. Generate manifests locally and update YAML paths if your layout differs. A dummy schema is provided in `examples/manifest.example.txt`.
+原始视频、实际标注清单和 `dataset_csv/` 不在 Git 中。数据来源包括 [KVQ](https://lixinustc.github.io/projects/KVQ/)、[LIVE-VQC](https://live.ece.utexas.edu/research/LIVEVQC/)、[KoNViD-1k](https://database.mmsp-kn.de/konvid-1k-database.html) 和 [YouTube-UGC](https://media.withyoutube.com/)。四列格式示例见 [manifest.example.txt](examples/manifest.example.txt)。
 
-Create the fixed-seed paper-like KVQ split:
+辅助权重需要 CLIP ViT-B/16、CONTRIQUE 和 3D Swin；训练配置还使用 LSVQ 预训练 KSVQE 权重。清单见 [pretrained_weights/README.md](pretrained_weights/README.md)。已有 Git LFS 时按需获取：
 
-```bash
-python scripts/make_kvq_paper_split.py \
-  --dataset-root data/KVQ-dataset \
-  --out-dir dataset_csv/KVQ_paper_split \
-  --seed 42
+```powershell
+git lfs pull --include="pretrained_weights/clip/ViT-B-16.pt,pretrained_weights/CONTRIQUE_checkpoint25.tar,pretrained_weights/swin_tiny_patch244_window877_kinetics400_1k.pth,pretrained_weights/KSVQE_techniqual_pretrainonLSVQ.pth,handoff_fullstack_inference/final_weights/KSVQE_paper7class_head_val-ltest_s_finetuned.pth"
+python check_ksvqe_swin_load.py --mode inspect
 ```
 
-Important: this helper assumes that every seven consecutive rows form one reference-content group and assigns labels by row position (`0..6`). The original processing-pattern metadata was not available, so this is a documented approximation, not an exact reconstruction of the authors' distortion taxonomy.
+仓库中的权重条目是 LFS 指针，运行前需要实际对象，而非只有指针文本。
 
-## Weights and Git LFS
+### 划分与训练
 
-All `*.pth`, `*.pt`, `*.tar`, `*.ckpt` and `*.onnx` files are routed through Git LFS. Run `git lfs install` before cloning or pushing weights. See [pretrained_weights/README.md](pretrained_weights/README.md) for the inventory and redistribution caveat.
+先准备源四列标注：`Train/train_data_4col_7class.txt`、`Validation/val_truth_4col_7class.txt`、`Test/test_MOS_7class.txt`。仅有视频目录还不能运行划分脚本。确认每七行确为同一参考内容后，在新的输出目录生成 paper-like 划分：
 
-The main fine-tuned checkpoint used by the public test config is:
+```powershell
+python scripts/make_kvq_paper_split.py --dataset-root data/KVQ-dataset --out-dir dataset_csv/KVQ_paper_split_reproduce --seed 42 --train-ratio 0.8
+```
+
+复制相应训练 YAML，在副本中设置实际的 `anno_file`、`data_prefix`、`load_path`；paper-like 副本应指向刚生成的两个划分文件。以下假定副本命名为 `config/local_challenge.yml` 和 `config/local_paper7class.yml`，需要先自行创建：
+
+```powershell
+python train.py --opt config/local_challenge.yml --gpu_id 0 -r checkpoint_challenge_reproduce/
+python train.py --opt config/local_paper7class.yml --gpu_id 0 -r checkpoint_paper7class_reproduce/
+```
+
+多卡入口为 `train_ddp.py`，启动参数可参考 [train_KSVQE_ddp.sh](scripts/train_KSVQE_ddp.sh)。
+
+### 有标签评价
+
+先复制 [测试配置](config/Kwai_KSVQE_test.yml)，核对视频、MOS、采样间隔和 checkpoint。该文件当前组合是 **KVQ Test 标注、interval 4、paper7class 权重**，不应把默认命令等同于表中任何一套历史协议。尤其要同时核对 `test_load_path`：`test.py` 会用它覆盖 `load_path`。
+
+```powershell
+python test.py --opt config/local_eval.yml --gpu_id 0 --mode val
+```
+
+跨库配置可参考 [LIVE-VQC](config/Kwai_KSVQE_livevqc.yml)、[KoNViD-1k](config/Kwai_KSVQE_konvid.yml) 和 [YouTube-UGC](config/eval_youtube_paper7class.yml)，仍需检查实际 checkpoint 与协议。
+
+### 无标签评分
+
+四列格式仍然需要保留，例如：
 
 ```text
-handoff_fullstack_inference/final_weights/
-└── KSVQE_paper7class_head_val-ltest_s_finetuned.pth
+uploads/example.mp4,0,0,0
 ```
 
-## Usage
+复制测试 YAML 为 `config/local_inference.yml`，设置 `anno_file`、`data_prefix` 和 `test_load_path` 后执行：
 
-### Train KSVQE
-
-Challenge-style split:
-
-```bash
-python train.py \
-  --o config/Kwai_KSVQE.yml \
-  --gpu_id 0 \
-  -r checkpoint/
+```powershell
+python test.py --opt config/local_inference.yml --gpu_id 0 --mode test
 ```
 
-Reference-level 80/20 paper-like split:
+结果写入 `output.txt`，格式为 `video_name,score`；重复运行会覆盖这个文件，需要保留时先另存结果。这是当前仓库的推理接口，没有配套可启动的 Web 服务。
 
-```bash
-python train.py \
-  --o config/Kwai_KSVQE_paper7class.yml \
-  --gpu_id 0 \
-  -r checkpoint_paper7class/
+### 已有失真组分析
+
+[analyze_kvq_distortions.py](scripts/analyze_kvq_distortions.py) 分析现有 KVQ 七视频组的元数据和可选帧统计，再做标准化、PCA、K-means 等探索。它不生成 blur / fog / noise 视频。加入帧统计时：
+
+```powershell
+python scripts/analyze_kvq_distortions.py --train-root data/KVQ-dataset/Train --val-root data/KVQ-dataset/Validation --test-root data/KVQ-dataset/Test --with-frame-features --out-dir analysis/kvq_reproduce
 ```
 
-Multi-GPU training is available through `train_ddp.py` and `scripts/train_KSVQE_ddp.sh`.
+需要对应标注；元数据读取还会调用 `ffprobe`。帧统计包含亮度、对比度、锐度等，仅供探索，不等于真实 processing-pattern 标签。
 
-### Validate with labels
-
-```bash
-python test.py \
-  --o config/Kwai_KSVQE_test.yml \
-  --gpu_id 0 \
-  --mode val
-```
-
-Validation averages clip predictions, linearly aligns predicted mean/std to MOS for metric calculation, and reports SRCC, PLCC, KRCC and RMSE.
-
-### Score videos
-
-Point `data.val.args.anno_file` and `data.val.args.data_prefix` in a copy of the test YAML to your manifest and video directory, then run:
-
-```bash
-python test.py --o path/to/inference.yml --gpu_id 0 --mode test
-```
-
-`--mode test` writes `output.txt`. It clips raw outputs to `[-2.5, 2.5]` and maps them linearly to `[1, 5]`. This is a deployment heuristic in the current code, not a learned calibration; use `--mode val` for formal labeled evaluation.
-
-### Analyze the KVQ processing groups
-
-```bash
-python scripts/analyze_kvq_distortions.py \
-  --train-root data/KVQ-dataset/Train \
-  --val-root data/KVQ-dataset/Validation \
-  --test-root data/KVQ-dataset/Test
-```
-
-This script does **not** generate blur/noise/fog samples. It analyzes the existing seven-video KVQ groups with file size, brightness, contrast, Laplacian sharpness, high-pass statistics, Sobel complexity, entropy, colorfulness and blockiness, then applies an internal z-score/PCA/K-means workflow.
-
-## Experiments and Results
-
-### KSVQE reproduction
-
-| Training protocol | Dataset | SRCC | PLCC | KRCC | RMSE |
-|---|---|---:|---:|---:|---:|
-| Challenge split, 7-class approximation | KVQ | **0.8657** | **0.8679** | 0.6793 | 0.3063 |
-| Challenge split, 7-class approximation | LIVE-VQC | 0.5010 | 0.5372 | 0.3509 | 16.4111 |
-| Challenge split, 7-class approximation | KoNViD-1k | 0.4667 | 0.4789 | — | — |
-| Challenge split, 7-class approximation | YouTube-UGC | 0.6383 | 0.6357 | 0.4525 | 0.5524 |
-| Reference 80/20, paper-like 7-class | KVQ | 0.8372 | 0.8456 | 0.6471 | 0.3170 |
-| Reference 80/20, paper-like 7-class | LIVE-VQC | **0.5859** | **0.5988** | 0.4117 | 15.2799 |
-| Reference 80/20, paper-like 7-class | KoNViD-1k | **0.5432** | **0.5601** | 0.3822 | 0.6011 |
-| Reference 80/20, paper-like 7-class | YouTube-UGC | **0.7038** | **0.7110** | 0.5099 | 0.4920 |
-
-The reference-level split trades some in-domain KVQ correlation for stronger cross-dataset correlation: relative to the challenge split, SRCC changes by `-0.0285` on KVQ, `+0.0849` on LIVE-VQC, `+0.0765` on KoNViD-1k and `+0.0654` on YouTube-UGC. Because split construction, sampling interval and batch size changed together, this is an observed comparison rather than a clean single-variable ablation.
-
-The original KSVQE paper reports KVQ SRCC/PLCC of `0.867/0.869`; the challenge-split reproduction reaches `0.8657/0.8679`. Cross-dataset reproduced values remain below the reported paper numbers, which is consistent with the approximate label construction and protocol mismatch documented above.
-
-![Validation metric trend](figs/result_figures/fig4_1_validation_metric_trend.png)
-
-The saved figure records best combined validation points around epoch 28 for the challenge-style run (`SRCC 0.8677`, `PLCC 0.8629`) and epoch 16 for the paper-like run (`SRCC 0.8361`, `PLCC 0.8465`). The final benchmark table is based on the selected evaluation checkpoints and therefore need not equal these plotted per-epoch peaks.
-
-Detailed provenance is in [docs/results](docs/results/README.md) and [KSVQE实验指标汇总.md](KSVQE实验指标汇总.md).
-
-### BRISQUE and artificial-distortion demo (team evidence only)
-
-The team presentation documents a web prototype with compression, blur, sharpening, noise, fog and brightness/saturation controls, plus parallel KSVQE and BRISQUE display scores. The exact distortion implementation, parameter units, BRISQUE source code and web backend are absent here.
-
-For one demonstrated video, clean scores were KSVQE `45.7` and BRISQUE-quality `47.6`; blur level `12` changed them to `47.9` and `41.2`, while fog level `100` changed them to `52.7` and `30.5`. BRISQUE's native lower-is-better distortion score was reportedly reversed for the UI, so lower displayed BRISQUE-quality means worse quality.
-
-The opposite movement is real for this one example but not enough to establish a general model property. Plausible contributors include KSVQE's semantic/region-selection branch responding to altered saliency, a display-score calibration mismatch, the fact that the model was trained on different processing workflows, and BRISQUE's sensitivity to local natural-scene statistics. Without the missing distortion code and a multi-video controlled experiment, these remain hypotheses.
-
-The same presentation reports BRISQUE-frame features + RBF-SVR on a 117-video LIVE-VQC validation set: default sampling/default SVR `0.5141/0.5529` SRCC/PLCC; 32 uniform frames/default SVR `0.5108/0.5476`; 32 frames/GridSearchCV `0.5110/0.4848`. These values are archived in `docs/results/brisque_svr_reported.csv` but are not reproducible from the current source tree.
-
-## Project Structure
+## 仓库目录
 
 ```text
 .
-├── config/                    # KSVQE training and cross-dataset YAML files
-├── datasets/                  # decoding, sampling and view decomposition
-├── dataset_csv/               # local generated manifests (Git-ignored)
-├── docs/results/              # curated result tables and provenance
-├── figs/                      # architecture, code and result figures
-├── models/
-│   ├── model.py               # network factory and regression head
-│   └── backbones/             # KSVQE, CLIP, CONTRIQUE and Swin components
-├── pretrained_weights/        # Git-LFS-managed pretrained checkpoints
-├── scripts/                   # split, audit, visualization and launch helpers
-├── train.py / train_ddp.py    # training entry points
-├── test.py                    # validation and inference entry point
-├── trainer.py                 # optimization, EMA, metrics and checkpoint logic
-├── KSVQE_RUNBOOK.md           # detailed reproducible commands
-└── PROJECT_SUMMARY.md         # résumé and interview preparation notes
+├── config/                    # 训练、评价和跨库配置
+├── datasets/                  # 解码、采样与多视图处理
+├── models/                    # KSVQE、CLIP、CONTRIQUE、Swin 与回归头
+├── docs/results/              # 指标 CSV 及来源说明
+├── figs/                      # 论文框架和归档实验图片
+├── pretrained_weights/        # 辅助预训练权重的 LFS 指针
+├── handoff_fullstack_inference/ # 推理交接说明和最终权重指针
+├── scripts/                   # 划分、检查、分析和启动脚本
+├── train.py / train_ddp.py
+├── test.py / trainer.py
+├── KSVQE_RUNBOOK.md            # 既有运行手册
+├── KSVQE实验指标汇总.md         # 历史汇总，部分描述需结合代码核对
+├── PROJECT_SUMMARY.md          # 既有项目整理
+├── requirements.txt
+├── README.md
+└── README_EN.md
 ```
 
-## Reproduction Notes and Limitations
+我保留了实验中的不一致和实现限制，便于以后继续核查。当前没有重新训练、重新计算完整测试集指标，也没有用缺失的 Web / BRISQUE 代码推导新结论。
 
-- The seven-class labels are assigned from row position within seven-video groups because the original fine-grained workflow labels were unavailable.
-- The reported paper-like run is not an exact official setting. Its 80/20 reference split, seed, batch size and temporal interval are documented so the difference is visible.
-- The KoNViD challenge-split raw log in the local archive stops at 16/1200 samples; its `0.4667/0.4789` SRCC/PLCC comes from the consolidated experiment report and is marked as such in the result CSV.
-- `Trainer` prints the two normal/EMA best tuples with inherited `model-n` / `model-s` labels that can be confusing. Use checkpoint filenames and the raw metric tuple rather than the display label alone.
-- The repository does not include raw datasets, private course reports, IDE files, local logs or the missing web/BRISQUE source.
-- The upstream repository did not expose an obvious license file during this audit. Review upstream licensing and third-party checkpoint terms before public redistribution or commercial use.
+## 来源与引用
 
-## Attribution
-
-This is a reproduction and engineering project, not a claim of authorship of KSVQE, KVQ, CLIP, CONTRIQUE, Swin Transformer, SimpleVQA or DOVER. Core research credit belongs to the cited authors and upstream repositories.
+KSVQE / KVQ 的研究与核心实现归原作者；仓库还使用了 CLIP、CONTRIQUE、Swin，以及上游引用的 SimpleVQA、DOVER 组件。权重和代码使用应遵循各自来源的许可；当前仓库不能提供完整的第三方授权结论。
 
 ```bibtex
 @inproceedings{lu2024kvq,
