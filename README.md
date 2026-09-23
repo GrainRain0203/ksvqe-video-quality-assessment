@@ -1,10 +1,10 @@
-# KSVQE 视频质量评价课程设计
+# KSVQE 无参考视频质量评价
 
 [English Version](README_EN.md)
 
-这个项目是我在课程设计中整理的无参考视频质量评价实验。我主要想跑通 KSVQE 的训练和评价流程，比较不同训练设置在 KVQ 本库与其他视频库上的表现，也想看看它和 BRISQUE 对人工失真的反应是否一致。
+本项目围绕无参考视频质量评价任务，对 KSVQE 进行复现、适配与跨域评测。我跑通并整理了 KSVQE 的训练和评价流程，比较不同训练设置在 KVQ 与其他视频数据集上的表现，并结合保留的 BRISQUE 结果，检查两种方法对人工失真的响应是否一致。
 
-我基于 [KVQ / KSVQE 官方代码](https://github.com/lixinustc/KVQ-Challenge-CVPR-NTIRE2024) 做数据与配置适配、权重加载调试、训练测试和结果整理。KSVQE 网络来自原论文与开源实现。团队演示还使用过 BRISQUE、人工失真控制和网页展示；当前仓库保留了相关结果记录，但没有这些部分的实现源码，因此不能直接从这里启动完整 Web 系统。
+我基于 [CVPR 2024 KVQ / KSVQE 官方代码](https://github.com/lixinustc/KVQ-Challenge-CVPR-NTIRE2024) 进行复现和适配，包括数据与配置适配、权重加载调试、训练测试和结果整理。KSVQE 网络来自原论文与开源实现，并非我提出的原创方法。我还参与了包含 BRISQUE、人工失真控制和网页展示的团队演示；当前仓库保留了相关结果记录，但没有这些部分的实现源码，因此不能直接从这里启动完整 Web 系统。
 
 ## 方法与调用流程
 
@@ -87,7 +87,7 @@ relative/video.mp4,cls_label,dis_label,mos
 当前主训练目标是：
 
 $$
-L=L_{\mathrm{PLCC}}+0.3L_{\mathrm{distortion\_contrastive}}.
+L=L_{\mathrm{PLCC}}+0.3\,L_{\mathrm{distortion\_contrastive}}.
 $$
 
 `trainer.py` 还计算可配置的 rank loss，两份主配置中的权重都是 0。PLCC loss 使用 batch 标准化后的预测、MOS 及相关项计算；具体实现见 [trainer.py](trainer.py)，不要把它简单理解为原始分数上的 MSE。
@@ -99,7 +99,7 @@ $$
 `test.py --mode val` 使用有效 MOS，汇总每个视频的预测后，将预测均值和标准差线性对齐到这批 MOS：
 
 $$
-\widetilde{p}_i=\frac{p_i-\mu_p}{\sigma_p}\sigma_y+\mu_y.
+\widetilde{p}_i=\frac{p_i-\mu_p}{\sigma_p}\,\sigma_y+\mu_y.
 $$
 
 随后计算 SRCC（也称 SROCC）、PLCC、KRCC 和 RMSE。这里的对齐使用评价集标签，不是独立训练出来的校准模型；不同数据集 MOS 标度不同，不宜直接横向比较 RMSE。
@@ -107,7 +107,7 @@ $$
 `test.py --mode test` 不做上述标签对齐，而是裁剪并映射展示分数：
 
 $$
-q=1+4\frac{\operatorname{clip}(p,-2.5,2.5)+2.5}{5}.
+q=1+4\,\frac{\operatorname{clip}\!\left(p,-2.5,2.5\right)+2.5}{5}.
 $$
 
 输出写入根目录 `output.txt`，范围为 $[1,5]$。这是代码中的展示用启发式映射；它不等于下面团队演示表的分数标度，也不能替代带标签的评价。
@@ -137,7 +137,7 @@ challenge / KoNViD-1k 行被明确标为汇总报告来源，旧来源说明记�
 
 ## BRISQUE、人工失真与网页演示记录
 
-在课程团队演示中，KSVQE 用于深度视频质量评分，BRISQUE 作为传统无参考图像质量方法对比。已有说明记录了逐帧 BRISQUE 处理及 RBF-SVR 拟合视频 MOS，也记录了视频上传、压缩、blur、sharpen、noise、fog、brightness / saturation 控制和并列评分展示。
+在我参与的团队演示中，KSVQE 用于深度视频质量评分，BRISQUE 作为传统无参考图像质量方法对比。已有说明记录了逐帧 BRISQUE 处理及 RBF-SVR 拟合视频 MOS，也记录了视频上传、压缩、blur、sharpen、noise、fog、brightness / saturation 控制和并列评分展示。
 
 **这些功能的 Web 前后端、失真生成代码、BRISQUE 实现和原始日志没有提交。** 当前可以检查的是 [推理交接说明](handoff_fullstack_inference/HANDOFF_README.md)、KSVQE 推理入口和结果 CSV；不能从仓库确认 Web 路由、失真参数单位、分数转换公式或具体个人分工。
 

@@ -1,10 +1,10 @@
-# KSVQE Video Quality Assessment
+# KSVQE No-Reference Video Quality Assessment
 
 [中文版](README.md)
 
-I worked on this no-reference video quality assessment project for a course assignment. I wanted to run KSVQE training and evaluation, compare its behavior on KVQ and other video datasets, and examine whether KSVQE and BRISQUE respond similarly to artificial distortions.
+This project focuses on no-reference video quality assessment through KSVQE reproduction, adaptation, and cross-dataset evaluation. I ran and documented the KSVQE training and evaluation pipeline, compared different training settings on KVQ and other video datasets, and used the preserved BRISQUE results to examine whether the two methods respond similarly to artificial distortions.
 
-I used the [official KVQ / KSVQE code](https://github.com/lixinustc/KVQ-Challenge-CVPR-NTIRE2024), adapted data and configurations, debugged checkpoint loading, and organized training and evaluation results. The KSVQE architecture comes from the original research and implementation. Our team demo also included BRISQUE, distortion controls, and a web interface. This repository preserves records of those features, but not their source code, so it cannot launch the complete web system.
+I reproduced and adapted the [official CVPR 2024 KVQ / KSVQE code](https://github.com/lixinustc/KVQ-Challenge-CVPR-NTIRE2024), including data and configuration adaptation, checkpoint-loading debugging, training and evaluation, and result organization. The KSVQE architecture comes from the original research and implementation; I do not present it as my original method. I also participated in a team demo with BRISQUE, distortion controls, and a web interface. This repository preserves records of those features, but not their source code, so it cannot launch the complete web system.
 
 ## Method and execution flow
 
@@ -87,7 +87,7 @@ Both main configurations specify 50 epochs, 2.5 warmup epochs, AdamW, learning r
 The main training objective is:
 
 $$
-L=L_{\mathrm{PLCC}}+0.3L_{\mathrm{distortion\_contrastive}}.
+L=L_{\mathrm{PLCC}}+0.3\,L_{\mathrm{distortion\_contrastive}}.
 $$
 
 `trainer.py` also computes a configurable rank loss, with weight 0 in both main configurations. Its PLCC loss uses batch-standardized predictions, MOS, and a correlation term; see [trainer.py](trainer.py). It is not plain MSE on raw scores.
@@ -99,7 +99,7 @@ Checkpoint loading accepts a plain parameter dictionary or a top-level `state_di
 `test.py --mode val` requires valid MOS values. After aggregating predictions for each video, it aligns prediction mean and standard deviation to the evaluation labels:
 
 $$
-\widetilde{p}_i=\frac{p_i-\mu_p}{\sigma_p}\sigma_y+\mu_y.
+\widetilde{p}_i=\frac{p_i-\mu_p}{\sigma_p}\,\sigma_y+\mu_y.
 $$
 
 It then computes SRCC (also called SROCC), PLCC, KRCC, and RMSE. This alignment uses evaluation labels; it is not a separately fitted calibration model. RMSE should not be compared directly across datasets with different MOS scales.
@@ -107,7 +107,7 @@ It then computes SRCC (also called SROCC), PLCC, KRCC, and RMSE. This alignment 
 `test.py --mode test` instead clips and maps raw predictions:
 
 $$
-q=1+4\frac{\operatorname{clip}(p,-2.5,2.5)+2.5}{5}.
+q=1+4\,\frac{\operatorname{clip}\!\left(p,-2.5,2.5\right)+2.5}{5}.
 $$
 
 It writes scores in $[1,5]$ to `output.txt` at the repository root. This is a display heuristic in the code, distinct from the team demo's score scale below and from labeled evaluation.
@@ -137,7 +137,7 @@ This is an archived validation plot, not a new training run. The Trainer's histo
 
 ## BRISQUE, artificial distortions, and the web demo
 
-In the course team's demo, KSVQE provided deep video quality scores and BRISQUE served as a traditional no-reference image-quality comparison. Existing notes describe per-frame BRISQUE processing and RBF-SVR fitting to video MOS. They also describe video uploads, compression, blur, sharpening, noise, fog, brightness / saturation controls, and side-by-side scores.
+In a team demo I participated in, KSVQE provided deep video quality scores and BRISQUE served as a traditional no-reference image-quality comparison. Existing notes describe per-frame BRISQUE processing and RBF-SVR fitting to video MOS. They also describe video uploads, compression, blur, sharpening, noise, fog, brightness / saturation controls, and side-by-side scores.
 
 **The web frontend and backend, distortion generator, BRISQUE implementation, and raw logs are not committed.** The available material consists of [inference handoff notes](handoff_fullstack_inference/HANDOFF_README.md), the KSVQE inference entry point, and result CSVs. It does not establish web routes, distortion units, display conversion formulas, or individual ownership of those missing components.
 
